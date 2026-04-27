@@ -169,7 +169,7 @@ func main() {
 			filepath.Join(metricsCertPath, metricsCertKey),
 		)
 		if err != nil {
-			setupLog.Error(err, "to initialize metrics certificate watcher", "error", err)
+			setupLog.Error(err, "failed to initialize metrics certificate watcher")
 			os.Exit(1)
 		}
 
@@ -207,6 +207,14 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "EncryptedSecret")
+		os.Exit(1)
+	}
+
+	if err := (&controller.GeneratedSecretReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "GeneratedSecret")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

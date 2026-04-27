@@ -5,9 +5,22 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - security.copsds.com
   resources:
   - encryptedsecrets
+  - generatedsecrets
   verbs:
   - create
   - delete
@@ -20,12 +33,14 @@ rules:
   - security.copsds.com
   resources:
   - encryptedsecrets/finalizers
+  - generatedsecrets/finalizers
   verbs:
   - update
 - apiGroups:
   - security.copsds.com
   resources:
   - encryptedsecrets/status
+  - generatedsecrets/status
   verbs:
   - get
   - patch

@@ -23,6 +23,19 @@ import (
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
+// Endpoint defines the connection details for crypto/generation services
+type Endpoint struct {
+	// Protocol: "http" or "grpc"
+	Protocol string `json:"protocol"`
+
+	// URL for HTTP endpoints (e.g., "https://crypto.example.com/encrypt")
+	// Address for gRPC endpoints (e.g., "crypto.example.com:443")
+	Address string `json:"address"`
+
+	// Optional: insecure connection (skip TLS verification)
+	Insecure *bool `json:"insecure,omitempty"`
+}
+
 // EncryptedSecretSpec defines the desired state of EncryptedSecret
 type EncryptedSecretSpec struct {
 
@@ -30,13 +43,18 @@ type EncryptedSecretSpec struct {
 	Data map[string]string `json:"data,omitempty"`
 
 	// endpoint servizio cifratura
-	CryptoEndpoint string `json:"cryptoEndpoint"`
+	CryptoEndpoint Endpoint `json:"cryptoEndpoint"`
 
 	// rotazione automatica
 	RotationInterval string `json:"rotationInterval,omitempty"`
 
 	// TTL
 	TTL string `json:"ttl,omitempty"`
+
+	// Versioni + restarts
+	MaxVersions int `json:"maxVersions,omitempty"`
+
+	RestartTargets []string `json:"restartTargets,omitempty"`
 }
 
 // EncryptedSecretStatus defines the observed state of EncryptedSecret
@@ -46,6 +64,10 @@ type EncryptedSecretStatus struct {
 	SecretName string `json:"secretName,omitempty"`
 
 	Phase string `json:"phase,omitempty"`
+
+	CurrentVersion int `json:"currentVersion,omitempty"`
+
+	ActiveSecret string `json:"activeSecret,omitempty"`
 }
 
 // +kubebuilder:object:root=true
