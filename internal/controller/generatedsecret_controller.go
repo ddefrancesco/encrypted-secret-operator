@@ -53,12 +53,15 @@ func (r *GeneratedSecretReconciler) Reconcile(
 		return ctrl.Result{}, nil
 	}
 
+	idempotencyKey := computeIdempotencyKey(gs)
+
 	// 2️⃣ chiamata API generazione
 	log.Info("Calling generation API", "endpoint", gs.Spec.Endpoint.Address)
 	resp, err := crypto.Generate(
 		gs.Spec.Endpoint,
 		gs.Spec.Type,
 		gs.Spec.Parameters,
+		idempotencyKey,
 	)
 	log.Info("Generation API response received")
 	if err != nil {
@@ -333,6 +336,21 @@ func normalize(v interface{}) interface{} {
 	default:
 		return val
 	}
+}
+
+func computeIdempotencyKey(gs *securityv1alpha1.GeneratedSecret) string {
+
+	hashable := struct {
+		Type       string
+		Parameters map[string]string
+		Version    int
+	}{
+		Type:       gs.Spec.Type,
+		Parameters: gs.Spec.Parameters,
+		Version:    gs.Status.CurrentVersion + 1,
+	}
+
+	return hashStructStable(hashable)
 }
 
 // SetupWithManager sets up the controller with the Manager.

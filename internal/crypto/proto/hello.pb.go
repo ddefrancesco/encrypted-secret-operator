@@ -110,11 +110,12 @@ func (x *HelloReply) GetMessage() string {
 }
 
 type GenerateRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Type          string                 `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`
-	Parameters    map[string]string      `protobuf:"bytes,2,rep,name=parameters,proto3" json:"parameters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Type           string                 `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`
+	Parameters     map[string]string      `protobuf:"bytes,2,rep,name=parameters,proto3" json:"parameters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	IdempotencyKey string                 `protobuf:"bytes,3,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *GenerateRequest) Reset() {
@@ -159,6 +160,13 @@ func (x *GenerateRequest) GetParameters() map[string]string {
 		return x.Parameters
 	}
 	return nil
+}
+
+func (x *GenerateRequest) GetIdempotencyKey() string {
+	if x != nil {
+		return x.IdempotencyKey
+	}
+	return ""
 }
 
 type Metadata struct {
@@ -522,12 +530,13 @@ const file_internal_crypto_proto_hello_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"&\n" +
 	"\n" +
 	"HelloReply\x12\x18\n" +
-	"\amessage\x18\x01 \x01(\tR\amessage\"\xac\x01\n" +
+	"\amessage\x18\x01 \x01(\tR\amessage\"\xd5\x01\n" +
 	"\x0fGenerateRequest\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12F\n" +
 	"\n" +
 	"parameters\x18\x02 \x03(\v2&.hello.GenerateRequest.ParametersEntryR\n" +
-	"parameters\x1a=\n" +
+	"parameters\x12'\n" +
+	"\x0fidempotency_key\x18\x03 \x01(\tR\x0eidempotencyKey\x1a=\n" +
 	"\x0fParametersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"x\n" +

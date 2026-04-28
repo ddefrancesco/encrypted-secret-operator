@@ -27,6 +27,7 @@ message HelloReply {
 message GenerateRequest {
     string type = 1;
     map<string, string> parameters = 2;
+    string idempotency_key = 3;
 }
 
 message Metadata {

@@ -53,12 +53,12 @@ func Encrypt(endpoint securityv1alpha1.Endpoint, data map[string]string) (map[st
 }
 
 // Generate generates data using the specified endpoint (HTTP or gRPC)
-func Generate(endpoint securityv1alpha1.Endpoint, typ string, params map[string]string) (*GenerateResponse, error) {
+func Generate(endpoint securityv1alpha1.Endpoint, typ string, params map[string]string, idempotencyKey string) (*GenerateResponse, error) {
 	switch strings.ToLower(endpoint.Protocol) {
 	case "grpc":
-		return generateGRPC(endpoint, typ, params)
+		return generateGRPC(endpoint, typ, params, idempotencyKey)
 	case "http", "":
-		return generateHTTP(endpoint, typ, params)
+		return generateHTTP(endpoint, typ, params, idempotencyKey)
 	default:
 		return nil, fmt.Errorf("unsupported protocol: %s", endpoint.Protocol)
 	}
@@ -102,13 +102,23 @@ func encryptHTTP(endpoint securityv1alpha1.Endpoint, data map[string]string) (ma
 }
 
 // generateHTTP handles HTTP-based generation
-func generateHTTP(endpoint securityv1alpha1.Endpoint, typ string, params map[string]string) (*GenerateResponse, error) {
+func generateHTTP(endpoint securityv1alpha1.Endpoint,
+	typ string,
+	params map[string]string,
+	idempotencyKey string,
+) (*GenerateResponse, error) {
 	reqBody := GenerateRequest{
 		Type:       typ,
 		Parameters: params,
 	}
 
 	body, _ := json.Marshal(reqBody)
+	req, err := http.NewRequest("POST", endpoint.Address, bytes.NewBuffer(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", idempotencyKey)
 
 	client := &http.Client{
 		Timeout: 30 * time.Second,
@@ -120,7 +130,7 @@ func generateHTTP(endpoint securityv1alpha1.Endpoint, typ string, params map[str
 		}
 	}
 
-	resp, err := client.Post(endpoint.Address, "application/json", bytes.NewBuffer(body))
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +190,7 @@ func encryptGRPC(endpoint securityv1alpha1.Endpoint, data map[string]string) (ma
 }
 
 // generateGRPC handles gRPC-based generation
-func generateGRPC(endpoint securityv1alpha1.Endpoint, typ string, params map[string]string) (*GenerateResponse, error) {
+func generateGRPC(endpoint securityv1alpha1.Endpoint, typ string, params map[string]string, idempotencyKey string) (*GenerateResponse, error) {
 	opts := []grpc.DialOption{}
 
 	if endpoint.Insecure != nil && *endpoint.Insecure {
@@ -199,8 +209,9 @@ func generateGRPC(endpoint securityv1alpha1.Endpoint, typ string, params map[str
 	defer cancel()
 
 	req := &hello.GenerateRequest{
-		Type:       typ,
-		Parameters: params,
+		Type:           typ,
+		Parameters:     params,
+		IdempotencyKey: idempotencyKey,
 	}
 
 	resp, err := client.Generate(ctx, req)

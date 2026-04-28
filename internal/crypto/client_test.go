@@ -98,7 +98,7 @@ func TestGenerateGRPCSuccess(t *testing.T) {
 		"type":   "password",
 	}
 
-	resp, err := generateGRPC(endpoint, "password", params)
+	resp, err := generateGRPC(endpoint, "password", params, "test-idempotency-key")
 	if err != nil {
 		t.Fatalf("generateGRPC failed: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestGenerateGRPCConnectionError(t *testing.T) {
 		Insecure: boolPtr(true),
 	}
 
-	_, err := generateGRPC(endpoint, "password", map[string]string{})
+	_, err := generateGRPC(endpoint, "password", map[string]string{}, "test-idempotency-key")
 	if err == nil {
 		t.Fatal("expected error but got none")
 	}
@@ -246,7 +246,7 @@ func TestGenerateWithGRPCProtocol(t *testing.T) {
 		Insecure: boolPtr(true),
 	}
 
-	resp, err := Generate(endpoint, "password", map[string]string{"length": "32"})
+	resp, err := Generate(endpoint, "password", map[string]string{"length": "32"}, "test-idempotency-key")
 	if err != nil {
 		t.Fatalf("Generate failed: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestGenerateWithInvalidProtocol(t *testing.T) {
 		Address:  "localhost:5000",
 	}
 
-	_, err := Generate(endpoint, "password", map[string]string{})
+	_, err := Generate(endpoint, "password", map[string]string{}, "test-idempotency-key")
 	if err == nil {
 		t.Fatal("expected error for unsupported protocol")
 	}
