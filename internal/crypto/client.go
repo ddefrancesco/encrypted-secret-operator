@@ -13,6 +13,7 @@ import (
 	hello "github.com/copsds/encrypted-secret-operator/internal/crypto/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 
 	securityv1alpha1 "github.com/copsds/encrypted-secret-operator/api/v1alpha1"
 )
@@ -25,19 +26,8 @@ type EncryptResponse struct {
 	Ciphertext map[string]string `json:"ciphertext"`
 }
 
-type GenerateRequest struct {
-	Type       string            `json:"type"`
-	Parameters map[string]string `json:"parameters"`
-}
-
-type GenerateResponse struct {
-	Data     map[string]string `json:"data"`
-	Metadata struct {
-		Version     string `json:"version"`
-		GeneratedAt string `json:"generatedAt"`
-		TTLSeconds  int    `json:"ttlSeconds"`
-		ID          string `json:"id"`
-	} `json:"metadata"`
+var client = &http.Client{
+	Timeout: 5 * time.Second,
 }
 
 // Encrypt encrypts data using the specified endpoint (HTTP or gRPC)
@@ -71,10 +61,6 @@ func encryptHTTP(endpoint securityv1alpha1.Endpoint, data map[string]string) (ma
 	}
 
 	body, _ := json.Marshal(reqBody)
-
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
 
 	if endpoint.Insecure != nil && *endpoint.Insecure {
 		client.Transport = &http.Transport{
@@ -119,10 +105,6 @@ func generateHTTP(endpoint securityv1alpha1.Endpoint,
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", idempotencyKey)
-
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
 
 	if endpoint.Insecure != nil && *endpoint.Insecure {
 		client.Transport = &http.Transport{
@@ -208,6 +190,11 @@ func generateGRPC(endpoint securityv1alpha1.Endpoint, typ string, params map[str
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	// 🔥 Idempotency via metadata
+	md := metadata.New(map[string]string{
+		"idempotency-key": idempotencyKey,
+	})
+	ctx = metadata.NewOutgoingContext(ctx, md)
 	req := &hello.GenerateRequest{
 		Type:           typ,
 		Parameters:     params,

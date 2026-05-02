@@ -11,11 +11,11 @@ import (
 
 	securityv1alpha1 "github.com/copsds/encrypted-secret-operator/api/v1alpha1"
 	"github.com/copsds/encrypted-secret-operator/internal/crypto"
+	"github.com/copsds/encrypted-secret-operator/internal/hash"
+	"github.com/copsds/encrypted-secret-operator/internal/reconcile"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -53,15 +53,19 @@ func (r *GeneratedSecretReconciler) Reconcile(
 		return ctrl.Result{}, nil
 	}
 
-	idempotencyKey := computeIdempotencyKey(gs)
+	//idempotencyKey := computeIdempotencyKey(gs)
+	// 2️⃣ spec hash + generation hash
+	specHash := hash.ComputeSpecHash(gs.Spec.Type, gs.Spec.Parameters)
+	version := gs.Status.CurrentVersion + 1
+	genHash := hash.ComputeGenerationHash(specHash, version)
 
-	// 2️⃣ chiamata API generazione
+	// 2️⃣ bis chiamata API generazione
 	log.Info("Calling generation API", "endpoint", gs.Spec.Endpoint.Address)
 	resp, err := crypto.Generate(
 		gs.Spec.Endpoint,
 		gs.Spec.Type,
 		gs.Spec.Parameters,
-		idempotencyKey,
+		genHash,
 	)
 	log.Info("Generation API response received")
 	if err != nil {
@@ -74,43 +78,58 @@ func (r *GeneratedSecretReconciler) Reconcile(
 		byteData[k] = []byte(v)
 	}
 
+	cipherHash := hash.HashBytes(byteData)
+
+	annotations := map[string]string{
+		reconcile.AnnotationSpecHash:       specHash,
+		reconcile.AnnotationGenerationHash: genHash,
+		reconcile.AnnotationCipherHash:     cipherHash,
+		reconcile.AnnotationChecksum:       hash.ComputeChecksum(byteData),
+	}
 	// 3️⃣ versioning
-	version := gs.Status.CurrentVersion + 1
 	secretName := fmt.Sprintf("%s-v%d", gs.Name, version)
 	log.Info("Created new Secret version", "secretName", secretName)
 
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: gs.Namespace,
-			Labels: map[string]string{
-				"generated-secret": gs.Name,
-			},
-			Annotations: map[string]string{
-				"generated-at": resp.Metadata.GeneratedAt,
-				"external-id":  resp.Metadata.ID,
-				"version":      resp.Metadata.Version,
-			},
-		},
-		Data: byteData,
-	}
-	log.Info("Creating new Secret", "secretName", secretName)
-	err = r.Create(ctx, secret)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
+	// secret := &corev1.Secret{
+	// 	ObjectMeta: metav1.ObjectMeta{
+	// 		Name:      secretName,
+	// 		Namespace: gs.Namespace,
+	// 		Labels: map[string]string{
+	// 			"generated-secret": gs.Name,
+	// 		},
+	// 		Annotations: annotations,
+	// 	},
+	// 	Data: byteData,
+	// }
+	// log.Info("Creating new Secret", "secretName", secretName)
+	// err = r.Create(ctx, secret)
+	// if err != nil {
+	// 	return ctrl.Result{}, err
+	// }
 
-	log.Info("Secret created successfully", "secretName", secretName)
+	// log.Info("Secret created successfully", "secretName", secretName)
 	// 4️⃣ aggiornamento alias
-	log.Info("Updating alias Secret", "aliasName", gs.Name)
-	err = r.updateAlias(ctx, gs, secret)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	log.Info("Alias Secret updated successfully", "aliasName", gs.Name)
+	log.Info("Creating/Updating alias Secret", "aliasName", gs.Name)
+	reconcile.UpdateAlias(
+		ctx,
+		r.Client,
+		gs.Name,
+		gs.Namespace,
+		byteData,
+		corev1.SecretTypeOpaque,
+		annotations,
+	)
+	log.Info("Alias Secret created/updated successfully", "aliasName", gs.Name)
 	// 5️⃣ cleanup
 	log.Info("Cleaning up old versions if needed", "maxVersions", gs.Spec.MaxVersions)
-	r.cleanupOldVersions(ctx, gs)
+	reconcile.CleanupOldVersions(
+		ctx,
+		r.Client,
+		gs.Namespace,
+		"generated-secret",
+		gs.Name,
+		gs.Spec.MaxVersions,
+	)
 	log.Info("Old versions cleanup completed if needed")
 	// 6️⃣ update status
 	log.Info("Updating GeneratedSecret status")
@@ -127,121 +146,122 @@ func (r *GeneratedSecretReconciler) Reconcile(
 	return ctrl.Result{}, nil
 }
 
-func (r *GeneratedSecretReconciler) cleanupOldVersions(
-	ctx context.Context,
-	gs *securityv1alpha1.GeneratedSecret,
-) error {
+// func (r *GeneratedSecretReconciler) cleanupOldVersions(
+// 	ctx context.Context,
+// 	gs *securityv1alpha1.GeneratedSecret,
+// ) error {
 
-	// Se non configurato → niente cleanup
-	if gs.Spec.MaxVersions == 0 {
-		return nil
-	}
+// 	// Se non configurato → niente cleanup
+// 	if gs.Spec.MaxVersions == 0 {
+// 		return nil
+// 	}
 
-	secretList := &corev1.SecretList{}
+// 	secretList := &corev1.SecretList{}
 
-	err := r.List(ctx,
-		secretList,
-		client.InNamespace(gs.Namespace),
-		client.MatchingLabels{
-			"generated-secret": gs.Name,
-		},
-	)
+// 	err := r.List(ctx,
+// 		secretList,
+// 		client.InNamespace(gs.Namespace),
+// 		client.MatchingLabels{
+// 			"generated-secret": gs.Name,
+// 		},
+// 	)
 
-	if err != nil {
-		return err
-	}
+// 	if err != nil {
+// 		return err
+// 	}
 
-	// Se sotto soglia → niente da fare
-	if len(secretList.Items) <= gs.Spec.MaxVersions {
-		return nil
-	}
+// 	// Se sotto soglia → niente da fare
+// 	if len(secretList.Items) <= gs.Spec.MaxVersions {
+// 		return nil
+// 	}
 
-	// Ordina per CreationTimestamp (più vecchi prima)
-	sort.Slice(secretList.Items, func(i, j int) bool {
-		return secretList.Items[i].CreationTimestamp.Before(
-			&secretList.Items[j].CreationTimestamp,
-		)
-	})
+// 	// Ordina per CreationTimestamp (più vecchi prima)
+// 	sort.Slice(secretList.Items, func(i, j int) bool {
+// 		return secretList.Items[i].CreationTimestamp.Before(
+// 			&secretList.Items[j].CreationTimestamp,
+// 		)
+// 	})
 
-	toDelete := len(secretList.Items) - gs.Spec.MaxVersions
+// 	toDelete := len(secretList.Items) - gs.Spec.MaxVersions
 
-	for i := 0; i < toDelete; i++ {
+// 	for i := 0; i < toDelete; i++ {
 
-		secret := secretList.Items[i]
+// 		secret := secretList.Items[i]
 
-		err := r.Delete(ctx, &secret)
-		if err != nil && !errors.IsNotFound(err) {
-			return err
-		}
-	}
+// 		err := r.Delete(ctx, &secret)
+// 		if err != nil && !errors.IsNotFound(err) {
+// 			return err
+// 		}
+// 	}
 
-	return nil
-}
-func (r *GeneratedSecretReconciler) updateAlias(
-	ctx context.Context,
-	gs *securityv1alpha1.GeneratedSecret,
-	versionSecret *corev1.Secret,
-) error {
+// 	return nil
+// }
 
-	aliasName := gs.Name
+// func (r *GeneratedSecretReconciler) updateAlias(
+// 	ctx context.Context,
+// 	gs *securityv1alpha1.GeneratedSecret,
+// 	versionSecret *corev1.Secret,
+// ) error {
 
-	alias := &corev1.Secret{}
+// 	aliasName := gs.Name
 
-	err := r.Get(ctx, types.NamespacedName{
-		Name:      aliasName,
-		Namespace: gs.Namespace,
-	}, alias)
+// 	alias := &corev1.Secret{}
 
-	// Se non esiste → crealo
-	if errors.IsNotFound(err) {
+// 	err := r.Get(ctx, types.NamespacedName{
+// 		Name:      aliasName,
+// 		Namespace: gs.Namespace,
+// 	}, alias)
 
-		newAlias := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      aliasName,
-				Namespace: gs.Namespace,
-				Labels: map[string]string{
-					"generated-secret": gs.Name,
-				},
-			},
-			Data: versionSecret.Data,
-			Type: versionSecret.Type,
-		}
+// 	// Se non esiste → crealo
+// 	if errors.IsNotFound(err) {
 
-		// checksum
-		checksum := computeChecksum(versionSecret.Data)
+// 		newAlias := &corev1.Secret{
+// 			ObjectMeta: metav1.ObjectMeta{
+// 				Name:      aliasName,
+// 				Namespace: gs.Namespace,
+// 				Labels: map[string]string{
+// 					"generated-secret": gs.Name,
+// 				},
+// 			},
+// 			Data: versionSecret.Data,
+// 			Type: versionSecret.Type,
+// 		}
 
-		if newAlias.Annotations == nil {
-			newAlias.Annotations = map[string]string{}
-		}
+// 		// checksum
+// 		checksum := computeChecksum(versionSecret.Data)
 
-		newAlias.Annotations["checksum"] = checksum
-		if versionSecret.Annotations != nil {
-			newAlias.Annotations["version"] = versionSecret.Annotations["version"]
-		}
+// 		if newAlias.Annotations == nil {
+// 			newAlias.Annotations = map[string]string{}
+// 		}
 
-		return r.Create(ctx, newAlias)
-	}
+// 		newAlias.Annotations["checksum"] = checksum
+// 		if versionSecret.Annotations != nil {
+// 			newAlias.Annotations["version"] = versionSecret.Annotations["version"]
+// 		}
 
-	if err != nil {
-		return err
-	}
+// 		return r.Create(ctx, newAlias)
+// 	}
 
-	// Aggiorna dati
-	alias.Data = versionSecret.Data
-	alias.Type = versionSecret.Type
+// 	if err != nil {
+// 		return err
+// 	}
 
-	if alias.Annotations == nil {
-		alias.Annotations = map[string]string{}
-	}
+// 	// Aggiorna dati
+// 	alias.Data = versionSecret.Data
+// 	alias.Type = versionSecret.Type
 
-	// aggiorna metadata
-	alias.Annotations["checksum"] = computeChecksum(versionSecret.Data)
-	if versionSecret.Annotations != nil {
-		alias.Annotations["version"] = versionSecret.Annotations["version"]
-	}
+// 	if alias.Annotations == nil {
+// 		alias.Annotations = map[string]string{}
+// 	}
 
-	return r.Update(ctx, alias)
-}
+// 	// aggiorna metadata
+// 	alias.Annotations["checksum"] = computeChecksum(versionSecret.Data)
+// 	if versionSecret.Annotations != nil {
+// 		alias.Annotations["version"] = versionSecret.Annotations["version"]
+// 	}
+
+// 	return r.Update(ctx, alias)
+// }
 
 func generationNeeded(gs *securityv1alpha1.GeneratedSecret) (bool, error) {
 
@@ -274,25 +294,25 @@ func generationNeeded(gs *securityv1alpha1.GeneratedSecret) (bool, error) {
 	return false, nil
 }
 
-func computeChecksum(data map[string][]byte) string {
+// func computeChecksum(data map[string][]byte) string {
 
-	keys := make([]string, 0, len(data))
+// 	keys := make([]string, 0, len(data))
 
-	for k := range data {
-		keys = append(keys, k)
-	}
+// 	for k := range data {
+// 		keys = append(keys, k)
+// 	}
 
-	sort.Strings(keys)
+// 	sort.Strings(keys)
 
-	h := sha256.New()
+// 	h := sha256.New()
 
-	for _, k := range keys {
-		h.Write([]byte(k))
-		h.Write(data[k])
-	}
+// 	for _, k := range keys {
+// 		h.Write([]byte(k))
+// 		h.Write(data[k])
+// 	}
 
-	return hex.EncodeToString(h.Sum(nil))
-}
+//		return hex.EncodeToString(h.Sum(nil))
+//	}
 func hashStructStable(obj interface{}) string {
 
 	normalized := normalize(obj)
@@ -338,20 +358,20 @@ func normalize(v interface{}) interface{} {
 	}
 }
 
-func computeIdempotencyKey(gs *securityv1alpha1.GeneratedSecret) string {
+// func computeIdempotencyKey(gs *securityv1alpha1.GeneratedSecret) string {
 
-	hashable := struct {
-		Type       string
-		Parameters map[string]string
-		Version    int
-	}{
-		Type:       gs.Spec.Type,
-		Parameters: gs.Spec.Parameters,
-		Version:    gs.Status.CurrentVersion + 1,
-	}
+// 	hashable := struct {
+// 		Type       string
+// 		Parameters map[string]string
+// 		Version    int
+// 	}{
+// 		Type:       gs.Spec.Type,
+// 		Parameters: gs.Spec.Parameters,
+// 		Version:    gs.Status.CurrentVersion + 1,
+// 	}
 
-	return hashStructStable(hashable)
-}
+// 	return hashStructStable(hashable)
+// }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *GeneratedSecretReconciler) SetupWithManager(mgr ctrl.Manager) error {
