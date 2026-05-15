@@ -1117,28 +1117,196 @@ spec:
   # Tipo di segreto da generare
   type: "keypair"
 
-  # Endpoint del servizio di generazione
-  endpoint: "https://keygen-service.example.com/generate"
+  # Endpoint del servizio di generazione (HTTP o gRPC)
+  endpoint:
+    protocol: "http"        # "http" o "grpc"
+    address: "https://keygen-service.example.com/generate"
+    insecure: false         # TLS verification (opzionale)
 
   # Parametri specifici per il tipo
   parameters:
-    algorithm: "RSA"
-    keySize: "2048"
-    format: "PEM"
+    algorithm: "AES"
+    keySize: "256"
+    format: "BASE64"
 
   # Trigger per la generazione
   trigger:
-    onCreate: true      # Genera alla creazione
-    onRotate: true      # Genera alla rotazione
+    onCreate: true      # Genera alla creazione del CRD
+    onRotate: true      # Genera alla rotazione programmata
     onSpecChange: false # Non rigenerare se parametri cambiano
-    schedule: ""        # Opzionale: cron schedule
 
-  # Intervallo di rotazione
+  # Intervallo di rotazione (formato Go duration)
   rotationInterval: "720h"  # Ogni mese
 
-  # Numero massimo di versioni
+  # Numero massimo di versioni da conservare
   maxVersions: 5
 ```
+
+### Ciclo di Riconciliazione del GeneratedSecret
+
+Il `GeneratedSecretReconciler` esegue un ciclo intelligente di generazione e versionamento. Ecco il flusso passo dopo passo:
+
+#### 📊 Diagramma di Flusso
+
+```
+┌────────────────────────────────────────────────────────┐
+│ 1️⃣ Recupera GeneratedSecret                            │
+│    Se non trovato → IgnoreNotFound                     │
+└─────────────────────┬────────────────────────────────┘
+                      │
+┌─────────────────────▼────────────────────────────────┐
+│ 2️⃣ Trigger Check: Generazione Necessaria?            │
+│                                                       │
+│ Verifica TRIGGER:                                    │
+│ • onCreate:     (CurrentVersion == 0 && triggerOn)   │
+│ • onRotate:     (now > lastGeneration + interval)    │
+│ • onSpecChange: (ObservedHash ≠ specHash)           │
+│                                                       │
+│ Se nessun trigger → Return (no generation)           │
+└─────────────────────┬────────────────────────────────┘
+                      │
+                      │ YES: generation needed
+                      │
+┌─────────────────────▼────────────────────────────────┐
+│ 3️⃣ Calcolo Hash dello Spec                           │
+│                                                       │
+│ specHash := SHA256(sorted(parameters.keys+values))   │
+│ version := CurrentVersion + 1                        │
+│ genHash := SHA256(specHash || version)               │
+└─────────────────────┬────────────────────────────────┘
+                      │
+┌─────────────────────▼────────────────────────────────┐
+│ 4️⃣ Chiamata API di Generazione                       │
+│                                                       │
+│ resp := crypto.Generate(                             │
+│   endpoint,                                          │
+│   type,                                              │
+│   parameters,                                        │
+│   genHash  ← idempotency key                         │
+│ )                                                     │
+│                                                       │
+│ Supporta: HTTP e gRPC automaticamente                │
+└─────────────────────┬────────────────────────────────┘
+                      │
+┌─────────────────────▼────────────────────────────────┐
+│ 5️⃣ Preparazione Dati                                 │
+│                                                       │
+│ • Riceve: map[string]string dai dati generati       │
+│ • Converte: in map[string][]byte                    │
+│ • Calcola: cipherHash := SHA256(data)               │
+│ • Prepara: Annotations (specHash, genHash,          │
+│   cipherHash, checksum)                             │
+└─────────────────────┬────────────────────────────────┘
+                      │
+┌─────────────────────▼────────────────────────────────┐
+│ 6️⃣ Creazione Version Secret                          │
+│                                                       │
+│ • Name:    {name}-v{version}                        │
+│ • Namespace: Same as GeneratedSecret                │
+│ • Data:    from generation response                 │
+│ • Labels:  "generated-secret": {name}               │
+│ • Annotations: specHash, genHash, cipherHash        │
+│                                                       │
+│ ✅ CREATO Version Secret                            │
+└─────────────────────┬────────────────────────────────┘
+                      │
+┌─────────────────────▼────────────────────────────────┐
+│ 7️⃣ Creazione/Aggiornamento Alias Secret              │
+│                                                       │
+│ • Name: {same as GeneratedSecret}                   │
+│ • Namespace: Same as GeneratedSecret                │
+│ • Data: Copy da Version Secret                      │
+│ • Type: SecretTypeOpaque                            │
+│ • Annotations: spec-hash, generation-hash, ...      │
+│                                                       │
+│ ✅ ALIAS sempre punta all'ultima versione            │
+└─────────────────────┬────────────────────────────────┘
+                      │
+┌─────────────────────▼────────────────────────────────┐
+│ 8️⃣ Cleanup Versioni Vecchie                          │
+│                                                       │
+│ Se maxVersions > 0:                                 │
+│ • Elenca tutti i Version Secrets con label          │
+│ • Se count > maxVersions:                           │
+│   - Ordina per CreationTimestamp                    │
+│   - Elimina i (count - maxVersions) più vecchi      │
+│                                                       │
+│ ✅ Mantiene solo le ultime N versioni               │
+└─────────────────────┬────────────────────────────────┘
+                      │
+┌─────────────────────▼────────────────────────────────┐
+│ 9️⃣ Aggiornamento Status                              │
+│                                                       │
+│ • CurrentVersion++                                  │
+│ • LastGeneration: metav1.Now()                      │
+│ • ObservedHash: specHash dei parameters             │
+│                                                       │
+│ ✅ Status aggiornato                                │
+└─────────────────────┬────────────────────────────────┘
+                      │
+                      ▼
+        ┌─────────────────────────┐
+        │ Riconciliazione Completata │
+        │ Return Result{}, nil    │
+        └─────────────────────────┘
+```
+
+#### Dettagli dei Trigger di Generazione
+
+| Trigger | Condizione | Caso d'Uso |
+|---------|-----------|-----------|
+| **onCreate** | `CurrentVersion == 0 && trigger.onCreate == true` | Genera al primo deploy |
+| **onRotate** | `now > lastGeneration + rotationInterval` | Genera periodicamente |
+| **onSpecChange** | `parameters hash != ObservedHash` | Genera se parametri cambiano |
+
+#### Logica dei Trigger nel Codice
+
+```go
+func generationNeeded(gs *GeneratedSecret) bool {
+  // 1. Prima creazione
+  if gs.Status.CurrentVersion == 0 && gs.Spec.Trigger.OnCreate {
+    return true  // Genera subito
+  }
+
+  // 2. Rotazione programmata
+  if gs.Spec.Trigger.OnRotate && gs.Spec.RotationInterval != "" {
+    interval := ParseDuration(gs.Spec.RotationInterval)
+    nextGeneration := gs.Status.LastGeneration.Add(interval)
+    if time.Now().After(nextGeneration) {
+      return true  // Tempo di rigenerare
+    }
+  }
+
+  // 3. Cambio parametri
+  specHash := hashStructStable(gs.Spec.Parameters)
+  if gs.Spec.Trigger.OnSpecChange &&
+     gs.Status.ObservedHash != specHash {
+    return true  // Parametri modificati
+  }
+
+  return false  // Nessun trigger
+}
+```
+
+#### Hash Stabili per Idempotenza
+
+Il controller utilizza **hash stabili** per garantire che la stessa input produca sempre lo stesso hash:
+
+```go
+func hashStructStable(obj interface{}) string {
+  // 1. Normalizza l'oggetto (ordina le chiavi ricorsivamente)
+  normalized := normalize(obj)
+  
+  // 2. Serializza in JSON ordinato
+  bytes := json.Marshal(normalized)
+  
+  // 3. Calcola SHA256
+  hash := sha256.Sum256(bytes)
+  return hex.EncodeToString(hash[:])
+}
+```
+
+**Beneficio**: Anche se i parametri vengono passati in ordine diverso, il `specHash` rimane identico.
 
 ### Caso d'Uso: Generazione Coppia di Chiavi RSA
 
@@ -1208,6 +1376,168 @@ T=720h  Rotazione scatta
 - ✅ Rotazione periodica per sicurezza
 - ✅ Versioning per audit e rollback
 - ✅ Integrazione con servizi di crittografia esistenti
+
+---
+
+### Caso d'Uso: Generazione Password Randomica per Database
+
+**Scenario**: Generare automaticamente una password casuale per un user PostgreSQL, ruotata settimanalmente.
+
+```yaml
+apiVersion: security.copsds.com/v1alpha1
+kind: GeneratedSecret
+metadata:
+  name: postgres-user-password
+  namespace: databases
+spec:
+  type: "password"
+  endpoint:
+    protocol: "http"
+    address: "https://password-gen-service.internal/generate"
+  parameters:
+    length: "32"
+    complexity: "high"
+    includeSymbols: "true"
+    excludeChars: "'\"|"
+  trigger:
+    onCreate: true
+    onRotate: true
+    onSpecChange: false
+  rotationInterval: "168h"  # Una volta a settimana
+  maxVersions: 4
+```
+
+#### Flusso di Aggiornamento Password
+
+```
+T=0        GeneratedSecret creato
+           → Genera password casuale v1
+           → Crea Secret "postgres-user-password" con password
+           → DBA applica la password su PostgreSQL
+
+T=168h     Rotazione scatta
+           → Genera nuova password casuale v2
+           → Crea Version Secret v2
+           → Alias aggiornato
+           → Le app leggono la nuova password
+
+T=336h     Altra rotazione
+           → Genera password v3
+           → v1 eliminata (maxVersions=4)
+           → Mantiene: v2, v3, v4
+```
+
+**Benefici**:
+- ✅ Password generatee secondo policy di security
+- ✅ Rotazione automatica settimanale
+- ✅ Nessuna password hardcodificata
+- ✅ Audit trail completo delle rotazioni
+
+---
+
+### Caso d'Uso: Generazione API Token con Scadenza
+
+**Scenario**: Generare token API per integrazione esterna, rinnovati automaticamente prima della scadenza.
+
+```yaml
+apiVersion: security.copsds.com/v1alpha1
+kind: GeneratedSecret
+metadata:
+  name: external-api-token
+  namespace: integrations
+spec:
+  type: "api-token"
+  endpoint:
+    protocol: "grpc"
+    address: "token-issuer.internal:9000"
+  parameters:
+    service: "external-service"
+    scope: "write:data,read:metrics"
+    expiresIn: "8640000"  # 100 giorni in secondi
+  trigger:
+    onCreate: true
+    onRotate: true
+    onSpecChange: false
+  rotationInterval: "720h"  # Rotazione ogni 30 giorni (10 giorni prima di scadenza)
+  maxVersions: 2
+```
+
+#### Flusso di Rinnovamento Token
+
+```
+T=0 giorni       GeneratedSecret creato
+                 → Chiama token issuer (gRPC)
+                 → Riceve token valido per 100 giorni
+                 → Crea Secret con token
+                 → App legge dal Secret
+
+T=30 giorni      Rotazione scatta (prima che scada)
+                 → Genera nuovo token (valido altri 100 giorni)
+                 → Crea Version Secret v2
+                 → Alias aggiornato
+                 → App automaticamente legge il nuovo token
+                 → v1 conservata per rollback
+
+T=60 giorni      Altra rotazione
+                 → Genera token v3
+                 → v1 eliminata (maxVersions=2)
+```
+
+**Benefici**:
+- ✅ Token sempre valido e non scaduto
+- ✅ Rotazione proattiva prima della scadenza
+- ✅ Supporto a gRPC per comunicazione efficiente
+- ✅ Rollback veloce in caso di problema
+
+---
+
+### Annotazioni nel GeneratedSecret
+
+Il controller `GeneratedSecretReconciler` aggiunge automaticamente annotazioni ai Version Secret e Alias Secret per tracking e audit:
+
+| Annotazione | Valore | Scopo |
+|-------------|--------|-------|
+| `spec-hash` | SHA256 hex | Hash dei parametri di generazione |
+| `generation-hash` | SHA256 hex | Hash = specHash + version (idempotency key) |
+| `cipher-hash` | SHA256 hex | Hash dei dati effettivamente generati |
+| `checksum` | SHA256 hex | Checksum totale del secret per rilevare tampering |
+
+**Esempio di Alias Secret con Annotazioni**:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jwt-keypair
+  namespace: auth-service
+  annotations:
+    spec-hash: "abc123def456..."
+    generation-hash: "def456ghi789..."
+    cipher-hash: "ghi789jkl012..."
+    checksum: "jkl012mno345..."
+type: Opaque
+data:
+  private_key: <base64>
+  public_key: <base64>
+```
+
+**Caso di Uso delle Annotazioni**:
+
+1. **Debug**: Verificare quale versione di parametri è stata usata per generare
+   ```bash
+   kubectl get secret jwt-keypair -o json | jq .metadata.annotations
+   ```
+
+2. **Detección di Tampering**: Comparare il `checksum` salvato con il hash calcolato
+   ```bash
+   kubectl get secret jwt-keypair -o jsonpath='{.data}' | sha256sum
+   ```
+
+3. **Audit Trail**: Ogni version secret mantiene le annotazioni della generazione che l'ha creata
+   ```bash
+   kubectl get secret jwt-keypair-v1 -o jsonpath='{.metadata.annotations}'
+   kubectl get secret jwt-keypair-v2 -o jsonpath='{.metadata.annotations}'
+   ```
 
 ---
 
